@@ -4,7 +4,6 @@ from botocore.client import ClientError
 from django_q.brokers import Broker
 from django_q.conf import Conf
 
-
 QUEUE_DOES_NOT_EXIST = "AWS.SimpleQueueService.NonExistentQueue"
 
 
@@ -27,9 +26,24 @@ class Sqs(Broker):
         # sqs supports max 10 messages in bulk
         if Conf.BULK > 10:
             Conf.BULK = 10
-        tasks = self.queue.receive_messages(
-            MaxNumberOfMessages=Conf.BULK, VisibilityTimeout=Conf.RETRY
-        )
+
+        params = {"MaxNumberOfMessages": Conf.BULK, "VisibilityTimeout": Conf.RETRY}
+
+        # sqs long polling
+        sqs_config = Conf.SQS
+        if "receive_message_wait_time_seconds" in sqs_config:
+            wait_time_second = sqs_config.get("receive_message_wait_time_seconds", 20)
+
+            # validation of parameter
+            if not isinstance(wait_time_second, int):
+                raise ValueError("receive_message_wait_time_seconds should be int")
+            if wait_time_second > 20:
+                raise ValueError(
+                    "receive_message_wait_time_seconds is invalid. Reason: Must be >= 0 and <= 20"
+                )
+            params.update({"WaitTimeSeconds": wait_time_second})
+
+        tasks = self.queue.receive_messages(**params)
         if tasks:
             return [(t.receipt_handle, t.body) for t in tasks]
 
@@ -67,6 +81,10 @@ class Sqs(Broker):
         if "aws_region" in config:
             config["region_name"] = config["aws_region"]
             del config["aws_region"]
+
+        if "receive_message_wait_time_seconds" in config:
+            del config["receive_message_wait_time_seconds"]
+
         return Session(**config)
 
     def get_queue(self):
@@ -77,7 +95,7 @@ class Sqs(Broker):
             # exist try to create it.
             return self.sqs.get_queue_by_name(QueueName=self.list_key)
         except ClientError as exp:
-            if not exp.response["Error"]["Code"] == QUEUE_DOES_NOT_EXIST:
+            if exp.response["Error"]["Code"] != QUEUE_DOES_NOT_EXIST:
                 raise exp
 
         return self.sqs.create_queue(QueueName=self.list_key)
